@@ -4,9 +4,12 @@ services:
     image: telemetry-udp-probe:latest
     ports:
       - "8000:8000"        # HTTP API / /docs
+      - "9998:9998"        # TCP 入口（两字节大端长度分帧，巡检终端接入）
       - "9999:9999/udp"    # 本地回显端（容器内探测默认走 127.0.0.1，此映射供宿主机手工验证）
     environment:
       ECHO_HOST: 0.0.0.0        # 回显端监听地址
       ECHO_PORT: "9999"         # 回显端 UDP 端口
-      PROBE_TARGET_HOST: 127.0.0.1  # 探测默认目标（容器内本地回显端）
+      PROBE_TARGET_HOST: 127.0.0.1  # 探测与 TCP 入口的默认回显目标（容器内本地回显端）
+      TCP_ENTRY_HOST: 0.0.0.0   # TCP 入口监听地址
+      TCP_ENTRY_PORT: "9998"    # TCP 入口端口
     restart: unless-stopped

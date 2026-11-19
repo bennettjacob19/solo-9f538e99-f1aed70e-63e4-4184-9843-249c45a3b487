@@ -10,8 +10,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 
-# 8000/tcp: HTTP API 与 /docs；9999/udp: 本地回显端
-EXPOSE 8000/tcp 9999/udp
+# 8000/tcp: HTTP API 与 /docs；9998/tcp: TCP 入口；9999/udp: 本地回显端
+EXPOSE 8000/tcp 9998/tcp 9999/udp
 
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
     CMD python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/',timeout=2)" || exit 1

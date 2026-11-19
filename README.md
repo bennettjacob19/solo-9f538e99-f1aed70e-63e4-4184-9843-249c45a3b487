@@ -4,6 +4,11 @@
 FastAPI + asyncio 实现的探测 API 与本地回显端，默认探测范围 **576～1400 字节**，
 二分搜索收敛，当次返回最大确认长度、各次探测结果及无法判定原因。
 
+维护网只放行 TCP？巡检终端可经 **TCP 入口**（默认 9998 端口）用已有的 MTUP
+探测报文逐条核对 UDP 回显：两字节大端长度分帧收发，入口把有效帧原样转发给
+本地回显端并按请求顺序回写结果；也可以在 `/docs` 里直接调 `POST /tcp-check`
+一键核对。
+
 ## 快速开始
 
 ### Docker Compose（推荐）
@@ -11,6 +16,7 @@ FastAPI + asyncio 实现的探测 API 与本地回显端，默认探测范围 **
 ```bash
 docker compose up --build
 # 打开 http://localhost:8000/docs
+# TCP 入口监听 9998 端口（宿主机已映射）
 ```
 
 ### 本地运行
@@ -27,6 +33,47 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
+
+## TCP 入口（巡检终端接入）
+
+- **分帧**：收发均为 `uint16be 长度 + 负载` 两字节大端长度分帧。
+- **终端约定**：每次连接使用新的探测编号（MTUP 头中的 UUID），序号逐帧递增。
+- **转发**：28～1400 字节的有效 MTUP 请求帧原样发给本地 UDP 回显端；
+  无效帧（长度越界、报文不自洽）不转发，立即回写零长度帧。
+- **流水线**：先前帧未回也可继续发；单连接 8 帧未回写结果时暂停收新帧，
+  结果回写后自动恢复（TCP 背压）。
+- **有序回写**：UDP 回包即使乱序到达，也按请求顺序把原始回包写回 TCP。
+- **占位**：帧发出后 500ms 未收到匹配回包，或发送失败，回写零长度帧占位；
+  迟到回包丢弃。
+- **隔离**：每条连接使用独立 UDP socket（独立临时端口），各连接结果互不影响。
+- **半关闭**：终端半关闭写端后，截断帧不转发；完整帧的结果全部写完再关闭连接。
+
+手工验证示例：
+
+```python
+import socket, uuid
+from app.packets import build_packet
+
+sid = uuid.uuid4()
+s = socket.create_connection(("127.0.0.1", 9998))
+for seq, size in enumerate([64, 100, 1400], 1):
+    pkt = build_packet(sid, seq, size)
+    s.sendall(len(pkt).to_bytes(2, "big") + pkt)
+s.shutdown(socket.SHUT_WR)          # 半关闭写端
+# 逐帧读取响应：echo 原文，或 0 长度帧表示未回显；读到 EOF 即结束
+```
+
+### `POST /tcp-check`（/docs 内即可操作）
+
+输入一组报文长度，服务端走**实际 TCP 连接**发帧并半关闭，当次返回各帧的
+回显字节数或未回显：
+
+```json
+{"sizes": [64, 100, 1400, 1500]}
+```
+
+响应 `frames[]` 给出每帧 `seq / size / echoed / echo_bytes`（上例中 1500
+超过入口有效帧上限，`echoed=false`、`echo_bytes=0`）。
 
 ## 值班流程（/docs 内即可操作）
 
@@ -71,17 +118,22 @@ pytest tests/ -v
 |---|---|---|
 | `ECHO_HOST` | `0.0.0.0` | 回显端监听地址 |
 | `ECHO_PORT` | `9999` | 回显端 UDP 端口 |
-| `PROBE_TARGET_HOST` | `127.0.0.1` | 探测默认目标（`POST /probe` 可用 `target_host/target_port` 覆盖，指向真实网关） |
+| `PROBE_TARGET_HOST` | `127.0.0.1` | 探测与 TCP 入口的默认回显目标（`POST /probe` 可用 `target_host/target_port` 覆盖，指向真实网关） |
+| `TCP_ENTRY_HOST` | `0.0.0.0` | TCP 入口监听地址 |
+| `TCP_ENTRY_PORT` | `9998` | TCP 入口端口 |
 
 ## 项目结构
 
 ```
 app/
-  main.py        # FastAPI 路由与生命周期
+  main.py        # FastAPI 路由与生命周期（含 /tcp-check）
   echo_server.py # 本地回显端（阈值丢弃/断联，epoch）
   prober.py      # 二分探测引擎（DF、探测编号、小包复核、作废判定）
+  tcp_entry.py   # TCP 入口（长度分帧、有序回写、8 帧背压、半关闭处理）
   packets.py     # 探测报文编解码
   netutil.py     # DF 位设置
-tests/test_api.py
+tests/
+  test_api.py        # 探测 API 与回显端测试
+  test_tcp_entry.py  # TCP 入口与 /tcp-check 端到端测试
 Dockerfile / docker-compose.yml
 ```
